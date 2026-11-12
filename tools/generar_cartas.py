@@ -1,0 +1,172 @@
+#!/usr/bin/env python3
+"""
+Genera un PDF A4 con las cartas de Nuhitster, listo para imprimir a doble cara.
+
+Cada carta es un cuadrado de 60 mm:
+  - Cara A: QR que abre la canción en tu web (sin revelar nada).
+  - Cara B: año, título, artista y tema.
+
+Las páginas se alternan (cara A, cara B, cara A, cara B...). Imprime a doble cara
+con el giro por el BORDE LARGO. Las caras B ya van en espejo para que casen.
+
+Ejemplos:
+  python generar_cartas.py --base https://TUUSUARIO.github.io/Nuhitster/
+  python generar_cartas.py --base https://TUUSUARIO.github.io/Nuhitster/ --bloque gotico
+  python generar_cartas.py --base https://TUUSUARIO.github.io/Nuhitster/ --tema nu-metal --tema metalcore
+  python generar_cartas.py --base https://TUUSUARIO.github.io/Nuhitster/ --solo-con-yt
+"""
+import argparse
+import io
+import json
+import sys
+from pathlib import Path
+
+try:
+    import qrcode
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.units import mm
+    from reportlab.lib.utils import ImageReader, simpleSplit
+    from reportlab.pdfgen import canvas
+except ImportError:
+    sys.exit("Faltan dependencias. Ejecuta:  pip install -r tools/requirements.txt")
+
+COLORES = {"metal": (0.85, 0.15, 0.12), "gotico": (0.55, 0.35, 0.85)}
+TEMAS = {
+    "nu-metal": "NU METAL", "alt-metal": "ALT METAL", "metalcore": "METALCORE",
+    "metal-moderno": "METAL MODERNO", "industrial": "INDUSTRIAL",
+    "gothic-rock": "GOTHIC ROCK", "post-punk": "POST-PUNK", "darkwave": "DARKWAVE",
+    "synthpop": "SYNTHPOP", "gothic-metal": "GOTHIC METAL",
+}
+
+
+def qr_reader(url):
+    img = qrcode.make(url, error_correction=qrcode.constants.ERROR_CORRECT_M, border=1)
+    buf = io.BytesIO()
+    img.save(buf, format="PNG")
+    buf.seek(0)
+    return ImageReader(buf)
+
+
+def marco(c, x, y, size):
+    c.setStrokeColorRGB(0.75, 0.75, 0.75)
+    c.setLineWidth(0.3)
+    c.rect(x, y, size, size)
+
+
+def cara_qr(c, x, y, size, s, url):
+    marco(c, x, y, size)
+    col = COLORES.get(s["bloque"], (0.3, 0.3, 0.3))
+    band = 8 * mm
+    c.setFillColorRGB(*col)
+    c.rect(x, y, size, band, stroke=0, fill=1)
+    c.setFillColorRGB(1, 1, 1)
+    c.setFont("Helvetica-Bold", 7)
+    c.drawCentredString(x + size / 2, y + band / 2 - 2.4, f"NUHITSTER  ·  {s['id']}")
+    qr = size - 2 * 5 * mm - band + 2 * mm
+    c.drawImage(qr_reader(url), x + (size - qr) / 2, y + band + 2 * mm, qr, qr)
+
+
+def cara_datos(c, x, y, size, s):
+    marco(c, x, y, size)
+    col = COLORES.get(s["bloque"], (0.3, 0.3, 0.3))
+    band = 6 * mm
+    c.setFillColorRGB(*col)
+    c.rect(x, y + size - band, size, band, stroke=0, fill=1)
+    c.setFillColorRGB(1, 1, 1)
+    c.setFont("Helvetica-Bold", 6.5)
+    c.drawCentredString(x + size / 2, y + size - band / 2 - 2.2,
+                        TEMAS.get(s["tema"], s["tema"].upper()))
+
+    c.setFillColorRGB(0.08, 0.08, 0.1)
+    c.setFont("Helvetica-Bold", 34)
+    c.drawCentredString(x + size / 2, y + size * 0.52, str(s["anio"]))
+
+    ancho = size - 8 * mm
+    fs = 9.5
+    while fs >= 6:
+        lineas = simpleSplit(s["titulo"], "Helvetica-Bold", fs, ancho)
+        if len(lineas) <= 3:
+            break
+        fs -= 0.5
+    c.setFont("Helvetica-Bold", fs)
+    ty = y + size * 0.36
+    for ln in lineas:
+        c.drawCentredString(x + size / 2, ty, ln)
+        ty -= fs + 1.5
+
+    c.setFillColorRGB(0.35, 0.35, 0.4)
+    fa = 8
+    while fa >= 5:
+        lin_a = simpleSplit(s["artista"], "Helvetica", fa, ancho)
+        if len(lin_a) <= 2:
+            break
+        fa -= 0.5
+    c.setFont("Helvetica", fa)
+    ty -= 2
+    for ln in lin_a:
+        c.drawCentredString(x + size / 2, ty, ln)
+        ty -= fa + 1.5
+
+    c.setFillColorRGB(0.6, 0.6, 0.65)
+    c.setFont("Helvetica", 6)
+    c.drawCentredString(x + size / 2, y + 3 * mm, s["id"])
+
+
+def main():
+    ap = argparse.ArgumentParser(description="Genera el PDF de cartas de Nuhitster")
+    ap.add_argument("--base", required=True,
+                    help="URL pública de tu web, p. ej. https://usuario.github.io/Nuhitster/")
+    ap.add_argument("--json", default=str(Path(__file__).resolve().parent.parent / "canciones.json"))
+    ap.add_argument("--salida", default="nuhitster_cartas.pdf")
+    ap.add_argument("--bloque", choices=["metal", "gotico"], help="Solo un bloque")
+    ap.add_argument("--tema", action="append", help="Solo estos temas (repetible)")
+    ap.add_argument("--solo-con-yt", action="store_true", help="Solo canciones que ya tienen enlace de YouTube")
+    ap.add_argument("--tam", type=float, default=60, help="Lado de la carta en mm (por defecto 60)")
+    a = ap.parse_args()
+
+    canciones = json.load(open(a.json, encoding="utf-8"))
+    if a.bloque:
+        canciones = [s for s in canciones if s["bloque"] == a.bloque]
+    if a.tema:
+        canciones = [s for s in canciones if s["tema"] in a.tema]
+    if a.solo_con_yt:
+        canciones = [s for s in canciones if s.get("yt")]
+    canciones.sort(key=lambda s: s["id"])
+    if not canciones:
+        sys.exit("No hay canciones con esos filtros.")
+
+    base = a.base.rstrip("/")
+    size = a.tam * mm
+    W, H = A4
+    cols = int(W // size)
+    rows = int(H // size)
+    por_pagina = cols * rows
+    x0 = (W - cols * size) / 2
+    y0 = (H - rows * size) / 2
+
+    c = canvas.Canvas(a.salida, pagesize=A4)
+    c.setTitle("Nuhitster - cartas")
+    for ini in range(0, len(canciones), por_pagina):
+        lote = canciones[ini:ini + por_pagina]
+        # Cara A (QR)
+        for i, s in enumerate(lote):
+            r, col = divmod(i, cols)
+            x = x0 + col * size
+            y = H - y0 - (r + 1) * size
+            cara_qr(c, x, y, size, s, f"{base}/?id={s['id']}")
+        c.showPage()
+        # Cara B (datos), en espejo horizontal para giro por borde largo
+        for i, s in enumerate(lote):
+            r, col = divmod(i, cols)
+            x = x0 + (cols - 1 - col) * size
+            y = H - y0 - (r + 1) * size
+            cara_datos(c, x, y, size, s)
+        c.showPage()
+    c.save()
+    paginas = 2 * ((len(canciones) + por_pagina - 1) // por_pagina)
+    print(f"{len(canciones)} cartas -> {a.salida} ({paginas} páginas, {cols}x{rows} por hoja)")
+    print("Imprime a doble cara, giro por el borde largo. Ejemplo de QR:", f"{base}/?id={canciones[0]['id']}")
+
+
+if __name__ == "__main__":
+    main()
