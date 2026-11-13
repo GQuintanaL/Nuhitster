@@ -4,6 +4,11 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#0b0a0f">
+<meta name="referrer" content="strict-origin-when-cross-origin">
+<meta name="mobile-web-app-capable" content="yes">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icons/icon-192.png">
+<link rel="apple-touch-icon" href="icons/icon-192.png">
 <title>Nuhitster</title>
 <style>
   :root{
@@ -57,11 +62,19 @@
   th,td{text-align:left;padding:6px 4px;border-bottom:1px solid var(--line);vertical-align:top}
   th{color:var(--mute);font-weight:600}
   td.no{color:#ff7a70} td.ok{color:var(--ok)}
+  .big.alt{background:var(--panel2);border:1px solid var(--line);margin-top:10px}
+  .scan{position:relative;aspect-ratio:1/1;background:#000;border-radius:16px;overflow:hidden;border:1px solid var(--line)}
+  .scan video{position:absolute;inset:0;width:100%;height:100%;object-fit:cover}
+  .scan .frame{position:absolute;inset:16%;border:3px solid rgba(255,255,255,.85);border-radius:18px;box-shadow:0 0 0 999px rgba(0,0,0,.45)}
+  .scan .frame::after{content:"";position:absolute;left:6%;right:6%;top:12%;height:2px;background:linear-gradient(90deg,transparent,var(--metal),transparent);animation:sweep 1.6s ease-in-out infinite}
+  @keyframes sweep{0%,100%{top:12%}50%{top:88%}}
+  input.id{flex:1;min-width:0;background:var(--panel2);border:1px solid var(--line);border-radius:12px;padding:12px 14px;color:var(--txt);font:inherit}
   .hide{display:none}
 </style>
 </head>
 <body>
 <main id="app"></main>
+<script src="config.js"></script>
 
 <script>
 "use strict";
@@ -94,6 +107,10 @@ function h(tag, attrs, ...kids){
   }
   return el;
 }
+// Pinta la vista ignorando los undefined/false de los elementos condicionales (cond && h(...)).
+function render(...nodes){
+  app.replaceChildren(...nodes.flat().filter(n => n != null && n !== false));
+}
 function lsGet(key, fallback){
   try { const v = localStorage.getItem(key); return v ? JSON.parse(v) : fallback; }
   catch(e){ return fallback; }
@@ -114,14 +131,28 @@ function pool(f){
 }
 
 /* ---------- Arranque ---------- */
-fetch("canciones.json", {cache:"no-cache"})
-  .then(r => r.json())
+// Dentro de la app Android, config.js trae la URL de tu web: se intenta bajar de allí la lista
+// más reciente (4 s máximo) y, si no hay conexión, se usa la copia que lleva la app.
+function cargarCanciones(){
+  const local = () => fetch("canciones.json", {cache:"no-cache"}).then(r => { if (!r.ok) throw new Error("local"); return r.json(); });
+  const url = window.NUH_CONFIG && window.NUH_CONFIG.jsonUrl;
+  if (!url) return local();
+  const ctrl = new AbortController();
+  const t = setTimeout(() => ctrl.abort(), 4000);
+  return fetch(url + "?t=" + Date.now(), {signal: ctrl.signal, cache:"no-cache"})
+    .then(r => { if (!r.ok) throw new Error("remoto"); return r.json(); })
+    .then(d => { if (!Array.isArray(d) || !d.length) throw new Error("vacío"); return d; })
+    .catch(local)
+    .finally(() => clearTimeout(t));
+}
+cargarCanciones()
   .then(data => { SONGS = data; route(); })
-  .catch(() => { app.replaceChildren(h("p", {class:"msg"}, "No se pudo cargar canciones.json")); });
+  .catch(() => { render(h("p", {class:"msg"}, "No se pudo cargar canciones.json")); });
 
 function route(){
   const p = new URLSearchParams(location.search);
   if (p.has("admin")) return viewAdmin();
+  if (p.has("scan")) return viewScan();
   if (p.has("id")){
     const s = SONGS.find(x => x.id === p.get("id"));
     return s ? viewSong(s) : viewHome("No existe la carta " + p.get("id"));
@@ -148,13 +179,14 @@ function viewHome(error){
       onclick: () => { f.temas = f.temas.includes(t) ? f.temas.filter(x => x!==t) : [...f.temas, t]; setF(f); viewHome(); }},
       TEMAS[t] || t)));
 
-  app.replaceChildren(
+  render(
     h("h1", {}, "Nuhitster"),
     h("p", {class:"tag"}, "Ordena la música de más antigua a más nueva. Nu metal, metal moderno y lo más oscuro del gótico."),
     error && h("p", {class:"msg"}, error),
     h("section", {class:"panel"}, h("h2", {}, "Mazo"), bloqueRow),
     h("section", {class:"panel"}, h("h2", {}, "Temas (vacío = todos)"), temaRow),
-    h("button", {class:"big", disabled: !withYt, onclick: draw}, "Sacar carta"),
+    h("button", {class:"big", onclick: viewScan}, "Escanear carta"),
+    h("button", {class:"big alt", disabled: !withYt, onclick: draw}, "Carta aleatoria (sin cartas)"),
     h("p", {class:"small"},
       withYt + " canciones con enlace de " + list.length + " en este mazo · " + played.length + " ya sacadas."),
     !withYt && h("p", {class:"small warn"}, "Aún no hay enlaces de YouTube en canciones.json. Mira el README (paso resolver_ids.py)."),
@@ -182,14 +214,20 @@ let ytPlayer = null, ytReady = null, currentSong = null;
 
 function loadYT(){
   if (ytReady) return ytReady;
-  ytReady = new Promise(resolve => {
+  ytReady = new Promise((resolve, reject) => {
     if (window.YT && window.YT.Player) return resolve();
     window.onYouTubeIframeAPIReady = resolve;
     const s = document.createElement("script");
     s.src = "https://www.youtube.com/iframe_api";
+    s.onerror = () => { ytReady = null; s.remove(); reject(new Error("sin conexión con YouTube")); };
     document.head.appendChild(s);
   });
   return ytReady;
+}
+function pvars(start){
+  const v = { playsinline:1, controls:0, rel:0, modestbranding:1, disablekb:1, fs:0, autoplay:1, start: start };
+  if (/^https?:$/.test(location.protocol)){ v.origin = location.origin; v.widget_referrer = location.href; }
+  return v;
 }
 function stopPlayer(){
   try { if (ytPlayer && ytPlayer.stopVideo) ytPlayer.stopVideo(); } catch(e){}
@@ -214,7 +252,7 @@ async function viewSong(s){
     revealBtn.classList.add("hide");
   }}, "Revelar");
 
-  app.replaceChildren(
+  render(
     h("div", {class:"top"},
       h("a", {href:"./", onclick: e => { e.preventDefault(); history.replaceState(null, "", "./"); viewHome(); }}, "← Inicio"),
       h("span", {class:"small"}, "Carta " + s.id)),
@@ -226,7 +264,9 @@ async function viewSong(s){
     h("div", {class:"row", style:"margin-bottom:12px"},
       h("button", {class:"ghost", onclick: restart}, "↺ Desde el principio")),
     revealBtn, revealBox,
-    h("div", {style:"margin-top:16px"}, h("button", {class:"ghost", style:"width:100%", onclick: draw}, "Siguiente carta aleatoria"))
+    h("div", {class:"row", style:"margin-top:16px"},
+      h("button", {class:"ghost", style:"flex:1", onclick: viewScan}, "Escanear otra"),
+      h("button", {class:"ghost", style:"flex:1", onclick: draw}, "Carta aleatoria"))
   );
 
   function showError(text){ msg.textContent = text; msg.classList.remove("hide"); }
@@ -235,7 +275,9 @@ async function viewSong(s){
     return;
   }
 
-  await loadYT();
+  try { await loadYT(); }
+  catch(e){ showError("No se pudo cargar YouTube. Comprueba la conexión a internet y vuelve a escanear la carta."); return; }
+  if (currentSong !== s) return;   // el usuario ya cambió de carta mientras cargaba
   const start = s.inicio || 0;
   if (ytPlayer && ytPlayer.loadVideoById){
     // El contenedor se recrea en cada vista, así que se reconstruye el reproductor.
@@ -244,8 +286,9 @@ async function viewSong(s){
   }
   ytPlayer = new YT.Player("yt", {
     videoId: s.yt,
-    playerVars: { playsinline:1, controls:0, rel:0, modestbranding:1, disablekb:1, fs:0, start: start },
+    playerVars: pvars(start),
     events: {
+      onReady: e => { try { e.target.playVideo(); } catch(_){} },   // si el navegador lo bloquea, queda el botón ▶
       onStateChange: e => {
         const playing = e.data === YT.PlayerState.PLAYING;
         document.body.classList.toggle("playing", playing);
@@ -270,11 +313,126 @@ async function viewSong(s){
   }
 }
 
+/* ---------- Escáner de QR ---------- */
+let scanStream = null, scanRaf = 0;
+
+function stopScan(){
+  cancelAnimationFrame(scanRaf); scanRaf = 0;
+  if (scanStream){ scanStream.getTracks().forEach(t => t.stop()); scanStream = null; }
+}
+function loadScript(src){
+  return new Promise((ok, ko) => {
+    const s = document.createElement("script");
+    s.src = src; s.onload = ok; s.onerror = () => ko(new Error("No se pudo cargar " + src));
+    document.head.appendChild(s);
+  });
+}
+// Acepta la URL completa del QR (…/?id=042), "id=042" o solo el número.
+function idFromQR(text){
+  text = String(text || "").trim();
+  try { const id = new URL(text).searchParams.get("id"); if (id) return id.trim(); } catch(e){}
+  const m = text.match(/(?:^|[?&])id=([^&#\s]+)/);
+  if (m) return decodeURIComponent(m[1]);
+  return /^\d{1,4}$/.test(text) ? text.padStart(3, "0") : null;
+}
+
+async function viewScan(){
+  stopPlayer(); stopScan();
+  document.body.classList.remove("playing");
+  history.replaceState(null, "", "./");
+
+  const video = h("video", {playsinline:true, autoplay:true});
+  video.muted = true;
+  const msg = h("div", {class:"msg hide"});
+  const input = h("input", {class:"id", inputmode:"numeric", placeholder:"Nº de carta, p. ej. 042", maxlength:"4"});
+  let done = false;
+
+  function showErr(t){ msg.textContent = t; msg.classList.remove("hide"); }
+  function abrir(id){
+    const s = SONGS.find(x => x.id === id);
+    if (!s){ showErr(id ? "La carta " + id + " no está en este mazo." : "Ese QR no es de una carta de Nuhitster."); return false; }
+    done = true; stopScan();
+    if (navigator.vibrate) navigator.vibrate(60);
+    history.replaceState(null, "", "?id=" + s.id);
+    viewSong(s);
+    return true;
+  }
+  function manual(){ const v = input.value.trim(); abrir(/^\d{1,4}$/.test(v) ? v.padStart(3, "0") : null); }
+  input.addEventListener("keydown", e => { if (e.key === "Enter") manual(); });
+
+  render(
+    h("div", {class:"top"},
+      h("a", {href:"./", onclick: e => { e.preventDefault(); done = true; stopScan(); viewHome(); }}, "← Inicio"),
+      h("span", {class:"small"}, "Escanear carta")),
+    h("div", {class:"scan"}, video, h("div", {class:"frame"})),
+    h("p", {class:"small"}, "Apunta al QR de la carta. La canción empieza al instante."),
+    msg,
+    h("section", {class:"panel"},
+      h("h2", {}, "¿Sin cámara? Escribe el número"),
+      h("div", {class:"row", style:"flex-wrap:nowrap"}, input, h("button", {class:"ghost", onclick: manual}, "Abrir")))
+  );
+
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia){
+    showErr("Este navegador no permite usar la cámara (hace falta una página https). Escribe el número de la carta.");
+    return;
+  }
+  try {
+    scanStream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: { ideal: "environment" }, width: { ideal: 1280 }, height: { ideal: 720 } },
+      audio: false
+    });
+  } catch(e){
+    showErr(e && e.name === "NotAllowedError"
+      ? "Permiso de cámara denegado. Actívalo en los ajustes o escribe el número de la carta."
+      : "No se pudo abrir la cámara: " + (e && e.message ? e.message : e));
+    return;
+  }
+  if (done){ stopScan(); return; }   // el usuario salió mientras se pedía el permiso
+  video.srcObject = scanStream;
+  try { await video.play(); } catch(e){}
+
+  let detector = null;
+  if ("BarcodeDetector" in window){ try { detector = new BarcodeDetector({formats:["qr_code"]}); } catch(e){} }
+  const canvas = document.createElement("canvas");
+  const ctx = canvas.getContext("2d", {willReadFrequently:true});
+
+  async function decode(){
+    const vw = video.videoWidth, vh = video.videoHeight;
+    if (!vw) return null;
+    if (detector){
+      try { const r = await detector.detect(video); return r.length ? r[0].rawValue : null; }
+      catch(e){ detector = null; }   // no soportado de verdad: pasa a jsQR
+    }
+    if (!window.jsQR) await loadScript("vendor/jsQR.js");
+    const k = Math.min(1, 640 / Math.max(vw, vh));
+    canvas.width = Math.round(vw * k); canvas.height = Math.round(vh * k);
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+    const img = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    const r = window.jsQR(img.data, img.width, img.height, {inversionAttempts:"dontInvert"});
+    return r ? r.data : null;
+  }
+
+  let busy = false, last = 0;
+  const tick = async t => {
+    if (done || !scanStream) return;
+    scanRaf = requestAnimationFrame(tick);
+    if (busy || t - last < 120) return;
+    busy = true; last = t;
+    try {
+      const txt = await decode();
+      if (txt && !done) abrir(idFromQR(txt));
+    } catch(e){
+      showErr("Error al leer la cámara: " + (e && e.message ? e.message : e));
+    } finally { busy = false; }
+  };
+  scanRaf = requestAnimationFrame(tick);
+}
+
 /* ---------- Vista: lista (spoilers) ---------- */
 function viewAdmin(){
   const sin = SONGS.filter(s => !s.yt).length;
   const rev = SONGS.filter(s => s.revisar).length;
-  app.replaceChildren(
+  render(
     h("div", {class:"top"}, h("a", {href:"./"}, "← Inicio"), h("span", {class:"small"}, "Lista")),
     h("p", {class:"small"}, SONGS.length + " canciones · " + sin + " sin enlace · " + rev + " con año por revisar"),
     h("table", {},
@@ -286,6 +444,11 @@ function viewAdmin(){
         h("td", {}, TEMAS[s.tema] || s.tema),
         h("td", {class: s.yt ? "ok" : "no"}, s.yt ? "✓" : "✗")))))
   );
+}
+/* ---------- Modo app: guardar la carcasa para abrir rápido ---------- */
+// Dentro del APK (Capacitor) los archivos ya van incluidos, así que no hace falta.
+if ("serviceWorker" in navigator && /^https?:$/.test(location.protocol) && !window.Capacitor){
+  window.addEventListener("load", () => { navigator.serviceWorker.register("sw.js").catch(() => {}); });
 }
 </script>
 </body>

@@ -14,12 +14,13 @@ Ejemplos:
   python generar_cartas.py --base https://TUUSUARIO.github.io/Nuhitster/ --bloque gotico
   python generar_cartas.py --base https://TUUSUARIO.github.io/Nuhitster/ --tema nu-metal --tema metalcore
   python generar_cartas.py --base https://TUUSUARIO.github.io/Nuhitster/ --solo-con-yt
+  python generar_cartas.py --base https://TUUSUARIO.github.io/Nuhitster/ --ids 300,301,302
 """
 import argparse
 import io
-import json
 import sys
-from pathlib import Path
+
+import nuh_common as nc
 
 try:
     import qrcode
@@ -31,12 +32,6 @@ except ImportError:
     sys.exit("Faltan dependencias. Ejecuta:  pip install -r tools/requirements.txt")
 
 COLORES = {"metal": (0.85, 0.15, 0.12), "gotico": (0.55, 0.35, 0.85)}
-TEMAS = {
-    "nu-metal": "NU METAL", "alt-metal": "ALT METAL", "metalcore": "METALCORE",
-    "metal-moderno": "METAL MODERNO", "industrial": "INDUSTRIAL",
-    "gothic-rock": "GOTHIC ROCK", "post-punk": "POST-PUNK", "darkwave": "DARKWAVE",
-    "synthpop": "SYNTHPOP", "gothic-metal": "GOTHIC METAL",
-}
 
 
 def qr_reader(url):
@@ -75,7 +70,7 @@ def cara_datos(c, x, y, size, s):
     c.setFillColorRGB(1, 1, 1)
     c.setFont("Helvetica-Bold", 6.5)
     c.drawCentredString(x + size / 2, y + size - band / 2 - 2.2,
-                        TEMAS.get(s["tema"], s["tema"].upper()))
+                        nc.TEMAS.get(s["tema"], s["tema"].upper()))
 
     c.setFillColorRGB(0.08, 0.08, 0.1)
     c.setFont("Helvetica-Bold", 34)
@@ -112,31 +107,11 @@ def cara_datos(c, x, y, size, s):
     c.drawCentredString(x + size / 2, y + 3 * mm, s["id"])
 
 
-def main():
-    ap = argparse.ArgumentParser(description="Genera el PDF de cartas de Nuhitster")
-    ap.add_argument("--base", required=True,
-                    help="URL pública de tu web, p. ej. https://usuario.github.io/Nuhitster/")
-    ap.add_argument("--json", default=str(Path(__file__).resolve().parent.parent / "canciones.json"))
-    ap.add_argument("--salida", default="nuhitster_cartas.pdf")
-    ap.add_argument("--bloque", choices=["metal", "gotico"], help="Solo un bloque")
-    ap.add_argument("--tema", action="append", help="Solo estos temas (repetible)")
-    ap.add_argument("--solo-con-yt", action="store_true", help="Solo canciones que ya tienen enlace de YouTube")
-    ap.add_argument("--tam", type=float, default=60, help="Lado de la carta en mm (por defecto 60)")
-    a = ap.parse_args()
-
-    canciones = json.load(open(a.json, encoding="utf-8"))
-    if a.bloque:
-        canciones = [s for s in canciones if s["bloque"] == a.bloque]
-    if a.tema:
-        canciones = [s for s in canciones if s["tema"] in a.tema]
-    if a.solo_con_yt:
-        canciones = [s for s in canciones if s.get("yt")]
-    canciones.sort(key=lambda s: s["id"])
-    if not canciones:
-        sys.exit("No hay canciones con esos filtros.")
-
-    base = a.base.rstrip("/")
-    size = a.tam * mm
+def generar_pdf(canciones, base, salida, tam=60):
+    """Crea el PDF de cartas. Devuelve (cartas, páginas, columnas, filas)."""
+    base = base.rstrip("/")
+    canciones = sorted(canciones, key=lambda s: (len(s["id"]), s["id"]))
+    size = tam * mm
     W, H = A4
     cols = int(W // size)
     rows = int(H // size)
@@ -144,7 +119,7 @@ def main():
     x0 = (W - cols * size) / 2
     y0 = (H - rows * size) / 2
 
-    c = canvas.Canvas(a.salida, pagesize=A4)
+    c = canvas.Canvas(str(salida), pagesize=A4)
     c.setTitle("Nuhitster - cartas")
     for ini in range(0, len(canciones), por_pagina):
         lote = canciones[ini:ini + por_pagina]
@@ -164,9 +139,41 @@ def main():
         c.showPage()
     c.save()
     paginas = 2 * ((len(canciones) + por_pagina - 1) // por_pagina)
-    print(f"{len(canciones)} cartas -> {a.salida} ({paginas} páginas, {cols}x{rows} por hoja)")
-    print("Imprime a doble cara, giro por el borde largo. Ejemplo de QR:", f"{base}/?id={canciones[0]['id']}")
+    return len(canciones), paginas, cols, rows
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(description="Genera el PDF de cartas de Nuhitster")
+    ap.add_argument("--base", required=True,
+                    help="URL pública de tu web, p. ej. https://usuario.github.io/Nuhitster/")
+    ap.add_argument("--json", default=str(nc.JSON_POR_DEFECTO))
+    ap.add_argument("--salida", default="nuhitster_cartas.pdf")
+    ap.add_argument("--bloque", choices=["metal", "gotico"], help="Solo un bloque")
+    ap.add_argument("--tema", action="append", help="Solo estos temas (repetible)")
+    ap.add_argument("--ids", help="Solo estos ids, separados por comas (p. ej. 300,301)")
+    ap.add_argument("--solo-con-yt", action="store_true", help="Solo canciones que ya tienen enlace de YouTube")
+    ap.add_argument("--tam", type=float, default=60, help="Lado de la carta en mm (por defecto 60)")
+    a = ap.parse_args(argv)
+
+    canciones = nc.leer_json(a.json)
+    if a.bloque:
+        canciones = [s for s in canciones if s["bloque"] == a.bloque]
+    if a.tema:
+        canciones = [s for s in canciones if s["tema"] in a.tema]
+    if a.ids:
+        ids = {i.strip() for i in a.ids.split(",")}
+        canciones = [s for s in canciones if s["id"] in ids]
+    if a.solo_con_yt:
+        canciones = [s for s in canciones if s.get("yt")]
+    if not canciones:
+        sys.exit("No hay canciones con esos filtros.")
+
+    n, paginas, cols, rows = generar_pdf(canciones, a.base, a.salida, a.tam)
+    print(f"{n} cartas -> {a.salida} ({paginas} páginas, {cols}x{rows} por hoja)")
+    print("Imprime a doble cara, giro por el borde largo. Ejemplo de QR:",
+          f"{a.base.rstrip('/')}/?id={sorted(canciones, key=lambda s: (len(s['id']), s['id']))[0]['id']}")
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())
