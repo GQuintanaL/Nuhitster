@@ -1,0 +1,74 @@
+name: Compilar APK
+
+# Cómo usarlo: pestaña "Actions" del repo -> "Compilar APK" -> "Run workflow".
+# Al terminar, el APK aparece en "Artifacts" (Nuhitster-apk). Si subes una etiqueta que empiece
+# por "v" (por ejemplo v1.0.0), además se publica en "Releases" con un enlace de descarga directo.
+on:
+  workflow_dispatch:
+    inputs:
+      url_web:
+        description: "URL de tu web, p. ej. https://usuario.github.io/Nuhitster/ (vacío = la de GitHub Pages de este repo). La app baja de ahí la lista de canciones al abrir, así no hay que recompilar al añadir canciones."
+        required: false
+        default: ""
+      modo_remoto:
+        description: "Avanzado: la app carga la web en vivo en vez de llevar los archivos dentro. Solo si YouTube diera error de reproducción dentro de la app."
+        type: boolean
+        required: false
+        default: false
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+env:
+  # Web de la que la app actualiza canciones.json. Por defecto, la de GitHub Pages de este repositorio.
+  NUH_WEB: ${{ inputs.url_web || format('https://{0}.github.io/{1}/', github.repository_owner, github.event.repository.name) }}
+  # Solo en modo remoto: la app es la web en vivo.
+  NUH_URL: ${{ inputs.modo_remoto && (inputs.url_web || format('https://{0}.github.io/{1}/', github.repository_owner, github.event.repository.name)) || '' }}
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Instalar dependencias
+        run: npm ci
+
+      - name: Preparar proyecto Android (web -> www, cap add, parches, sync)
+        run: npm run android:prepare
+
+      - name: Asegurar SDK de Android
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-36" "build-tools;36.0.0"
+
+      - name: Compilar APK
+        working-directory: android
+        run: ./gradlew assembleDebug --no-daemon --stacktrace
+
+      - name: Renombrar
+        run: cp android/app/build/outputs/apk/debug/app-debug.apk Nuhitster.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Nuhitster-apk
+          path: Nuhitster.apk
+
+      - name: Publicar en Releases (solo con etiqueta v*)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: Nuhitster.apk
